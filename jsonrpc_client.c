@@ -1,14 +1,19 @@
 // client.cpp
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
 #include "mongoose.h"
 
 static struct mg_mgr mgr;
 static struct mg_rpc *s_rpc_head = NULL;
 static int node_cnt = 0;
 
-static void rpc_sum(struct mg_rpc_req *r)
+// rpc-test
+static void rpc_sum_handler(struct mg_rpc_req *r)
 {
-    fprintf(stdout, "rpc_sum ");
+    fprintf(stdout, "rpc_sum_handler ");
     double a = 0.0, b = 0.0;
     int id = 0;
     mg_json_get_num(r->frame, "$.params[0]", &a);
@@ -18,25 +23,59 @@ static void rpc_sum(struct mg_rpc_req *r)
     mg_rpc_ok(r, "%g", a + b);
 }
 
-static void rpc_mul(struct mg_rpc_req *r)
+// 分布式共识的rpc方法，包括：1.找到新区块广播 2.投票广播(验证哈希) 3.上链广播(即得到半数以上的投票)
+
+static void new_block_broadcast(char *hash)
 {
-    fprintf(stdout, "rpc_mul\n");
-    double a = 0.0, b = 0.0;
-    mg_json_get_num(r->frame, "$.params[0]", &a);
-    mg_json_get_num(r->frame, "$.params[1]", &b);
-    mg_rpc_ok(r, "%g", a * b);
+    fprintf(stdout, "[System] new_block_broadcast:%s\n", hash);
+    mg_ws_printf(mgr.conns, WEBSOCKET_OP_TEXT, "{%m:%m,%m:%m}",
+                 MG_ESC("method"), MG_ESC("new_block"),
+                 MG_ESC("params"), MG_ESC(hash));
 }
 
-static void rpc_check_hash(struct mg_rpc_req *r)
+static void vote_broadcast(char *hash)
 {
-    fprintf(stdout, "rpc_check_hash\n");
-    // 检查哈希
+    fprintf(stdout, "[System] vote_broadcast\n");
+    mg_ws_printf(mgr.conns, WEBSOCKET_OP_TEXT, "{%m:%m,%m:%m}",
+                 MG_ESC("method"), MG_ESC("vote"),
+                 MG_ESC("params"), MG_ESC(hash));
 }
 
-static void rpc_newblock(struct mg_rpc_req *r)
+static void up_chain_broadcast(char *hash)
 {
-    fprintf(stdout, "rpc_newblock\n");
-    // 上链，存数据库
+    fprintf(stdout, "[System] up_chain_broadcast\n");
+    mg_ws_printf(mgr.conns, WEBSOCKET_OP_TEXT, "{%m:%m,%m:%m}",
+                 MG_ESC("method"), MG_ESC("up_chain"),
+                 MG_ESC("params"), MG_ESC(hash));
+}
+
+/**
+ * 其他节点找到新区块，验证并投票
+ */
+static void rpc_new_block_handler(struct mg_rpc_req *r)
+{
+    fprintf(stdout, "rpc_new_block_handler");
+    char *hash = mg_json_get_str(r->frame, "$.params");
+    vote_broadcast(hash);
+}
+
+/**
+ * 其他节点投票，记录下所有票数，过半后上链，发起上链广播，投票数据怎么存？
+ */
+static void rpc_vote_handler(struct mg_rpc_req *r)
+{
+    fprintf(stdout, "rpc_vote_handler ");
+    char *hash = mg_json_get_str(r->frame, "$.params");
+}
+
+/**
+ * 其他节点发起上链广播，验证后自己也上链，并把有关投票的数据删除
+ */
+static void rpc_up_chain_handler(struct mg_rpc_req *r)
+{
+    fprintf(stdout, "rpc_chain ");
+    char *hash = mg_json_get_str(r->frame, "$.params");
+    fprintf(stdout, "[Info] up_chain: %s", hash);
 }
 
 /**
@@ -113,10 +152,35 @@ static void ev_handler(struct mg_connection *c, int ev, void *ev_data, void *fn_
     }
 }
 
+void timerCallback()
+{
+    srand(time(NULL));
+    int x = rand() % 1000000;
+    if (x % 5 == 0)
+    {
+        char hash[10] = {0};
+        sprintf(hash, "%d", x);
+        new_block_broadcast(hash);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
         exit(1);
+
+    // 设置定时器
+    struct itimerval timer;
+    timer.it_interval.tv_sec = 3; // 间隔3秒
+    timer.it_interval.tv_usec = 0;
+    timer.it_value.tv_sec = 3; // 第一次触发也是3秒后
+    timer.it_value.tv_usec = 0;
+    // 注册信号处理函数
+    signal(SIGALRM, timerCallback);
+    // 启动定时器
+    setitimer(ITIMER_REAL, &timer, NULL);
+
+    // network
     char *ipport = argv[1];
     char server_url[100] = {0};
     sprintf(server_url, "ws://%s", ipport);
@@ -124,16 +188,18 @@ int main(int argc, char *argv[])
     mg_mgr_init(&mgr);
     mg_ws_connect(&mgr, server_url, ev_handler, NULL, NULL);
 
-    mg_rpc_add(&s_rpc_head, mg_str("sum"), rpc_sum, NULL);
-    mg_rpc_add(&s_rpc_head, mg_str("mul"), rpc_mul, NULL);
+    mg_rpc_add(&s_rpc_head, mg_str("sum"), rpc_sum_handler, NULL);
+    mg_rpc_add(&s_rpc_head, mg_str("new_block"), rpc_new_block_handler, NULL);
+    mg_rpc_add(&s_rpc_head, mg_str("vote"), rpc_vote_handler, NULL);
+    mg_rpc_add(&s_rpc_head, mg_str("up_chain"), rpc_up_chain_handler, NULL);
     mg_rpc_add(&s_rpc_head, mg_str("rpc.list"), mg_rpc_list, &s_rpc_head);
 
     for (;;)
     {
-        mg_mgr_poll(&mgr, 1000);
+        mg_mgr_poll(&mgr, 100);
     }
     mg_mgr_free(&mgr);
-    // mg_rpc_del(&s_rpc_head, NULL); // Deallocate RPC handlers
+    mg_rpc_del(&s_rpc_head, NULL); // Deallocate RPC handlers
 
     return 0;
 }

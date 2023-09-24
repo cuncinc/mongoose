@@ -101,13 +101,16 @@ static void ev_handler(struct mg_connection *c, int ev, void *ev_data, void *fn_
         fprintf(stdout, "[Received] [%d.%d.%d.%d:%d] ", c->rem.ip[0], c->rem.ip[1], c->rem.ip[2], c->rem.ip[3], c->rem.port);
         fprintf(stdout, "%s\n", msg);
 
-        if (c->data[1] = 'N' && msg[0] == '{') // 1.来自节点的消息 2.是json-rpc格式。才转发给其他节点
+        if (c->data[1] == 'N' && msg[0] == '{') // 1.来自节点的消息 2.是json-rpc格式。才转发给其他节点
             forward(wm, c);
         else if (strstr(msg, "i_am_node")) // 收到客户端的i_am_node消息，标记为节点
         {
-            c->data[1] = 'N'; // 标记此连接为节点
-            node_add_handler(c);
-            node_cnt_handler(c);
+            if (c->data[1] != 'N')
+            {
+                c->data[1] = 'N'; // 标记此连接为节点
+                node_add_handler(c);
+                node_cnt_handler(c);
+            }
         }
     }
     else if (ev == MG_EV_WS_OPEN)
